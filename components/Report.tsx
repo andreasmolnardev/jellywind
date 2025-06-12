@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Terminal } from "lucide-react"
+import { Terminal, ChevronDown, ChevronUp } from "lucide-react"
 import { useEffect, useState } from "react";
 import RootlessFrame from "./RootlessFrame";
 import { pl } from "date-fns/locale";
@@ -36,6 +36,19 @@ export default function ReportComponent() {
     token: ''
   });
 
+  // State for expand/collapse functionality
+  const [expandedSections, setExpandedSections] = useState({
+    mostListened: false,
+    topArtists: false,
+    mostSkipped: false
+  });
+
+  const toggleSection = (section: keyof typeof expandedSections) => {
+    setExpandedSections(prev => ({
+      ...prev,
+      [section]: !prev[section]
+    }));
+  };
 
   useEffect(() => {
     const serverUrl = localStorage.getItem("jellyfin_server_url") || '';
@@ -78,15 +91,15 @@ export default function ReportComponent() {
       // Get most played items (songs/tracks)
       const mostPlayedItems = await (async () => {
         const query = `
-    SELECT ItemId, ItemName, COUNT(*) as PlayCount, SUM(PlayDuration) as TotalDuration  
-    FROM PlaybackActivity  
-    WHERE ItemType = 'Audio'  
-    AND DateCreated BETWEEN '${fromDate}' AND '${toDate}'
-    AND UserId="${credentials.userId}"
-    GROUP BY ItemId, ItemName  
-    ORDER BY PlayCount DESC  
-    LIMIT 10
-  `;
+          SELECT ItemId, ItemName, COUNT(*) as PlayCount, SUM(PlayDuration) as TotalDuration  
+          FROM PlaybackActivity  
+          WHERE ItemType = 'Audio'  
+          AND DateCreated BETWEEN '${fromDate}' AND '${toDate}'
+          AND UserId="${credentials.userId}"
+          GROUP BY ItemId, ItemName  
+          ORDER BY PlayCount DESC  
+          LIMIT 10
+        `;
 
         const res = await fetch(`${credentials.serverUrl}/user_usage_stats/submit_custom_query`, {
           method: 'POST',
@@ -146,6 +159,7 @@ export default function ReportComponent() {
           SUM(PlayDuration) AS TotalDuration  
           FROM PlaybackActivity  
           WHERE ItemType = 'Audio'  
+            AND UserId="${credentials.userId}"
             AND DateCreated BETWEEN '${fromDate}' AND '${toDate}'  
             AND INSTR(ItemName, ' - ') > 0  
           GROUP BY Artist  
@@ -225,9 +239,62 @@ export default function ReportComponent() {
       };
 
       const enrichedArtists = await fetchTopArtistsWithThumbnails(topPlayedArtists);
-      console.log('Top Artists with Metadata:', enrichedArtists);
 
 
+      async function fetchMostSkippedSongs(fromDate: string, toDate: string) {
+        const query = `
+            SELECT ItemName,  
+                  ItemId,  
+                  COUNT(*) as play_count,  
+                  AVG(PlayDuration) as avg_duration_seconds,  
+                  COUNT(CASE WHEN PlayDuration < 30 THEN 1 END) as skip_count,  
+                  ROUND((COUNT(CASE WHEN PlayDuration < 30 THEN 1 END) * 100.0 / COUNT(*)), 2) as skip_percentage  
+            FROM PlaybackActivity   
+            WHERE ItemType = 'Audio'  
+            AND UserId="${credentials.userId}"
+              AND DateCreated BETWEEN '${fromDate}' AND '${toDate}'  
+            GROUP BY ItemName, ItemId  
+            HAVING play_count > 1  
+            ORDER BY skip_percentage DESC, avg_duration_seconds ASC  
+            LIMIT 50
+          `;
+
+        const res = await fetch(`${credentials.serverUrl}/user_usage_stats/submit_custom_query`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `MediaBrowser Token=${credentials.token}`,
+          },
+          body: JSON.stringify({
+            CustomQueryString: query,
+            ReplaceUserId: false,
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error(`Failed to fetch skip stats: ${res.statusText}`);
+        }
+
+        const result = await res.json();
+        const stats = result?.results || [];
+
+        // Map results to objects with named properties
+        const skippedSongs = stats.map(
+          ([itemName, itemId, playCount, avgDuration, skipCount, skipPercentage]) => ({
+            itemName,
+            itemId,
+            playCount,
+            avgDurationSeconds: avgDuration,
+            skipCount,
+            skipPercentage,
+          })
+        );
+
+        return skippedSongs;
+      }
+
+      const mostSkipped = await fetchMostSkippedSongs(fromDate, toDate);
+      console.log('Most Skipped Songs:', mostSkipped);
 
       const mostListened = mostPlayedItems.Items?.map((item: any, index: number) => ({
         rank: index + 1,
@@ -242,7 +309,7 @@ export default function ReportComponent() {
 
       return {
         mostListened,
-        //mostSkipped: potentialSkipped,
+        mostSkipped,
         topArtists: enrichedArtists,
         //topAlbums: topAlbumsList
       };
@@ -317,6 +384,40 @@ export default function ReportComponent() {
     });
   };
 
+  const renderExpandableList = (
+    items: any[],
+    sectionKey: keyof typeof expandedSections,
+    renderItem: (item: any, index: number) => React.ReactNode
+  ) => {
+    const isExpanded = expandedSections[sectionKey];
+    const displayItems = isExpanded ? items : items.slice(0, 5);
+    const hasMore = items.length > 5;
+
+    return (
+      <div className="space-y-3">
+        {displayItems.map((item, index) => renderItem(item, index))}
+        {hasMore && (
+          <button
+            onClick={() => toggleSection(sectionKey)}
+            className="flex items-center gap-2 w-full p-2 text-sm text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted"
+          >
+            {isExpanded ? (
+              <>
+                <ChevronUp className="h-4 w-4" />
+                Show less
+              </>
+            ) : (
+              <>
+                <ChevronDown className="h-4 w-4" />
+                Show {items.length - 5} more
+              </>
+            )}
+          </button>
+        )}
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="container mx-auto p-4">
@@ -385,8 +486,10 @@ export default function ReportComponent() {
             </CardHeader>
             <CardContent>
               {jellyfinData.mostListened?.length > 0 ? (
-                <div className="space-y-3">
-                  {jellyfinData.mostListened.map((song: any) => (
+                renderExpandableList(
+                  jellyfinData.mostListened,
+                  'mostListened',
+                  (song: any) => (
                     <div key={song.id} className="flex items-center gap-3">
                       <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-200 flex-shrink-0">
                         <img
@@ -411,8 +514,8 @@ export default function ReportComponent() {
                       </div>
                       <span className="text-sm font-medium flex-shrink-0">{song.playCountFromDB} plays</span>
                     </div>
-                  ))}
-                </div>
+                  )
+                )
               ) : (
                 <Alert variant="default">
                   <Terminal className="h-4 w-4" />
@@ -433,8 +536,10 @@ export default function ReportComponent() {
             </CardHeader>
             <CardContent>
               {jellyfinData.topArtists?.length > 0 ? (
-                <div className="space-y-3">
-                  {jellyfinData.topArtists.map((artist: any) => (
+                renderExpandableList(
+                  jellyfinData.topArtists,
+                  'topArtists',
+                  (artist: any) => (
                     <div key={artist.id} className="flex items-center gap-3">
                       <div className="w-12 h-12 rounded-full overflow-hidden bg-gray-200 flex-shrink-0">
                         <img
@@ -449,8 +554,8 @@ export default function ReportComponent() {
                       </div>
                       <span className="text-sm font-medium flex-shrink-0">{artist.plays} plays</span>
                     </div>
-                  ))}
-                </div>
+                  )
+                )
               ) : (
                 <Alert variant="default">
                   <Terminal className="h-4 w-4" />
@@ -473,8 +578,10 @@ export default function ReportComponent() {
             </CardHeader>
             <CardContent>
               {jellyfinData.mostSkipped?.length > 0 ? (
-                <div className="space-y-3">
-                  {jellyfinData.mostSkipped.map((song: any) => (
+                renderExpandableList(
+                  jellyfinData.mostSkipped,
+                  'mostSkipped',
+                  (song: any) => (
                     <div key={song.id} className="flex items-center gap-3">
                       <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-200 flex-shrink-0">
                         <img
@@ -499,8 +606,8 @@ export default function ReportComponent() {
                       </div>
                       <span className="text-sm font-medium flex-shrink-0">{song.skips} skips</span>
                     </div>
-                  ))}
-                </div>
+                  )
+                )
               ) : (
                 <Alert variant="default">
                   <Terminal className="h-4 w-4" />
