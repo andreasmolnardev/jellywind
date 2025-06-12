@@ -41,8 +41,14 @@ export default function AuthForm() {
         const username = formData.get("username")?.toString().trim();
         const password = formData.get("password")?.toString();
 
-        if (!useQuickConnect && !serverUrl) {
-            setAlert({ type: "error", title: "Server URL is required unless using Quick Connect." });
+        if (!serverUrl) {
+            setAlert({ type: "error", title: "Server URL is required, even when using Quick Connect." });
+            setLoading(false);
+            return;
+        }
+
+        if(!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://")) {
+            setAlert({ type: "error", title: "Server URL must start with http:// or https://" });
             setLoading(false);
             return;
         }

@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Terminal } from "lucide-react"
 import { useEffect, useState } from "react";
 import RootlessFrame from "./RootlessFrame";
 
@@ -35,7 +36,6 @@ export default function ReportComponent() {
     token: ''
   });
 
-  // This useEffect is redundant - the URL parsing is handled in loadReportData
 
   useEffect(() => {
     const serverUrl = localStorage.getItem("jellyfin_server_url") || '';
@@ -99,17 +99,17 @@ export default function ReportComponent() {
 
       if (!recentlyPlayed) return null;
 
-      // Get artists statistics
-      const topArtists = await fetchFromJellyfin(`/Users/${credentials.userId}/Items`, {
-        IncludeItemTypes: 'MusicArtist',
+      // Get artists statistics - we'll calculate from songs since artist PlayCount might not be reliable
+      const allPlayedSongs = await fetchFromJellyfin(`/Users/${credentials.userId}/Items`, {
+        IncludeItemTypes: 'Audio',
         Recursive: true,
         SortBy: 'PlayCount',
         SortOrder: 'Descending',
-        Limit: 10,
-        Fields: 'PlayCount'
+        Limit: 1000, // Get more songs to calculate artist stats
+        Fields: 'PlayCount,UserData,Artists,AlbumArtist'
       });
 
-      if (!topArtists) return null;
+      if (!allPlayedSongs) return null;
 
       // Get albums statistics
       const topAlbums = await fetchFromJellyfin(`/Users/${credentials.userId}/Items`, {
@@ -122,7 +122,7 @@ export default function ReportComponent() {
       });
 
       if (!topAlbums) return null;
-      
+
       // Process the data
       const mostListened = mostPlayedItems.Items?.map((item: any, index: number) => ({
         rank: index + 1,
@@ -133,8 +133,8 @@ export default function ReportComponent() {
         id: item.Id
       })) || [];
 
-      // ????
-      const potentialSkipped = recentlyPlayed.Items?.filter((item: any) => 
+      // Process skipped songs
+      const potentialSkipped = recentlyPlayed.Items?.filter((item: any) =>
         (item.UserData?.PlayCount || 0) < 3 && item.UserData?.LastPlayedDate
       ).map((item: any, index: number) => ({
         rank: index + 1,
@@ -145,12 +145,72 @@ export default function ReportComponent() {
         id: item.Id
       })).slice(0, 10) || [];
 
-      const topArtistsList = topArtists.Items?.map((item: any, index: number) => ({
-        rank: index + 1,
-        name: item.Name,
-        plays: item.UserData?.PlayCount || 0,
-        id: item.Id
-      })) || [];
+      // Calculate top artists from song play counts
+      const artistPlayCounts: { [key: string]: { name: string; plays: number; id?: string } } = {};
+      
+      const fetchAllArtists = async () => {
+        const response = await fetchFromJellyfin('/Artists', {
+          Limit: 99999 // A very high limit to get everything in one call
+        });
+
+        return response?.Items || [];
+      };
+
+      const allArtists = await fetchAllArtists();
+
+      const artistMap: { [name: string]: { id: string, name: string, imageTag?: string } } = {};
+
+      allArtists?.forEach((artist: any) => {
+        artistMap[artist.Name] = {
+          id: artist.Id,
+          name: artist.Name,
+          imageTag: artist.ImageTags?.Primary
+        };
+      });
+
+      console.log('Artist Map:', artistMap);
+
+
+      allPlayedSongs.Items?.forEach((song: any) => {
+        const playCount = song.UserData?.PlayCount || 0;
+        if (playCount > 0) {
+          // Get all artists for this song
+          const artists = song.Artists || [];
+          const albumArtist = song.AlbumArtist;
+
+          // Add album artist if it exists
+          if (albumArtist) {
+            if (!artistPlayCounts[albumArtist]) {
+              artistPlayCounts[albumArtist] = { name: albumArtist, plays: 0 };
+            }
+            artistPlayCounts[albumArtist].plays += playCount;
+          }
+
+          // Add individual artists
+          artists.forEach((artist: string) => {
+            if (!artistPlayCounts[artist]) {
+              artistPlayCounts[artist] = { name: artist, plays: 0 };
+            }
+            artistPlayCounts[artist].plays += playCount;
+          });
+        }
+      });
+
+
+      // Convert to sorted array and get top 10
+      const topArtistsList = Object.values(artistPlayCounts)
+        .sort((a, b) => b.plays - a.plays)
+        .slice(0, 10)
+        .map((artist, index) => {
+          const realArtist = artistMap[artist.name];
+          return {
+            rank: index + 1,
+            name: artist.name,
+            plays: artist.plays,
+            id: realArtist?.id,
+            imageTag: realArtist?.imageTag
+          };
+        });
 
       const topAlbumsList = topAlbums.Items?.map((item: any, index: number) => ({
         rank: index + 1,
@@ -185,8 +245,8 @@ export default function ReportComponent() {
         const url = window.location.href;
         const urlObj = new URL(url);
         const params = new URLSearchParams(urlObj.search);
-        const id = params.get('id'); // Changed from 'reportId' to 'id' to match the first useEffect
-        
+        const id = params.get('id');
+
         if (!id) {
           setError('No report ID found in the URL');
           setLoading(false);
@@ -287,6 +347,7 @@ export default function ReportComponent() {
     );
   }
 
+
   return (
     <RootlessFrame title={reportData.title} subheading={`${formatDate(reportData.timespan.from)} - ${formatDate(reportData.timespan.to)}`}>
       <Tabs defaultValue="mostPlayed">
@@ -294,7 +355,7 @@ export default function ReportComponent() {
           <TabsTrigger value="mostPlayed">Most played</TabsTrigger>
           <TabsTrigger value="mostSkipped">Most skipped</TabsTrigger>
         </TabsList>
-        <TabsContent value="mostPlayed">
+        <TabsContent value="mostPlayed" className="space-y-2">
           <Card>
             <CardHeader>
               <CardTitle>Songs</CardTitle>
@@ -338,6 +399,44 @@ export default function ReportComponent() {
                   <AlertTitle>No Data</AlertTitle>
                   <AlertDescription>
                     No played songs found for this time period.
+                  </AlertDescription>
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Artists</CardTitle>
+              <CardDescription>
+                These are your top 10 most played artists.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {jellyfinData.topArtists?.length > 0 ? (
+                <div className="space-y-3">
+                  {jellyfinData.topArtists.map((artist: any) => (
+                    <div key={artist.id} className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-full overflow-hidden bg-gray-200 flex-shrink-0">
+                        <img
+                          src={`${credentials.serverUrl}/Items/${artist.id}/Images/Primary?tag=${artist.imageTag}&fillHeight=120&fillWidth=120`}
+                          alt={artist.name}
+                          className="w-12 h-12 object-cover rounded-full"
+                        />
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium truncate">{artist.name}</p>
+                      </div>
+                      <span className="text-sm font-medium flex-shrink-0">{artist.plays} plays</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Alert variant="default">
+                  <Terminal className="h-4 w-4" />
+                  <AlertTitle>No Data</AlertTitle>
+                  <AlertDescription>
+                    No played artists found for this time period.
                   </AlertDescription>
                 </Alert>
               )}
