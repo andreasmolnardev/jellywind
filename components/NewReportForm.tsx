@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import { subMonths, subYears } from 'date-fns';
+
 import { useRouter } from 'next/navigation';
 import { addDays } from 'date-fns';
 import { Label } from '@radix-ui/react-label';
@@ -30,33 +32,106 @@ export default function NewReportForm() {
   const [file, setFile] = useState<File | null>(null);
 
   // handle tab change
+
   function handleTabChange(value: string) {
     setTabValue(value);
+
+    const to = new Date();
+    let from = to;
+
+    switch (value) {
+      case '1y':
+        from = subYears(to, 1);
+        break;
+      case '6m':
+        from = subMonths(to, 6);
+        break;
+      case '3m':
+        from = subMonths(to, 3);
+        break;
+      case '1m':
+        from = subMonths(to, 1);
+        break;
+      case 'custom':
+        return;
+    }
+
+    console.log('Setting date range:', from, to);
+    setDate({ from, to });
   }
+
 
   // handle form submission
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+
     const id = uuidv4();
-    const report = {
-      id,
-      title,
-      timespan: tabValue === 'custom' ? date : { preset: tabValue },
-      fileName: file?.name || null,
-      createdAt: new Date().toISOString(),
-    };
 
-    // fetch existing reports
-    const stored = localStorage.getItem('reports');
-    const reports = stored ? JSON.parse(stored) : [];
+    if (file) {
+      const reader = new FileReader();
 
-    // add and store
-    reports.push(report);
-    localStorage.setItem('reports', JSON.stringify(reports));
+      reader.onload = async () => {
+        try {
+          const raw = reader.result as string;
+          let json;
+          console.log('Raw file content:', raw);
 
-    // redirect to report page
-    router.push(`/report?reportId=${id}`);
+          const convertToJSONString = (ndjson) => {
+            try {
+              const lines = ndjson.trim().split('\n');
+              const jsonObjects = lines.map(line => JSON.parse(line));
+              json = JSON.stringify(jsonObjects);
+              console.log('Parsed JSON:', json);
+            } catch (err) {
+              console.error('Error parsing NDJSON:', err);
+            }
+          }
+
+          json = await convertToJSONString(raw);
+
+          const report = {
+            id,
+            title,
+            timespan: date,
+            fileName: file.name,
+            fileContent: json,
+            createdAt: new Date().toISOString(),
+          };
+
+          const stored = localStorage.getItem('reports');
+          const reports = stored ? JSON.parse(stored) : [];
+
+          reports.push(report);
+          localStorage.setItem('reports', JSON.stringify(reports));
+
+          router.push(`/report?id=${id}`);
+        } catch (err) {
+          console.error('Invalid JSON or NDJSON file:', err);
+          alert("Invalid JSON or NDJSON file.");
+        }
+      };
+
+      reader.readAsText(file);
+    } else {
+      const report = {
+        id,
+        title,
+        timespan: date,
+        fileName: null,
+        fileContent: null,
+        createdAt: new Date().toISOString(),
+      };
+
+      const stored = localStorage.getItem('reports');
+      const reports = stored ? JSON.parse(stored) : [];
+
+      reports.push(report);
+      localStorage.setItem('reports', JSON.stringify(reports));
+
+      router.push(`/report?id=${id}`);
+    }
   }
+
 
   return (
     <form
@@ -123,7 +198,7 @@ export default function NewReportForm() {
 
       {/* Additional sources */}
       <div className="grid w-full max-w-sm items-center gap-1">
-        <Label htmlFor="extra-sources">Additional Sources</Label>
+        <Label htmlFor="extra-sources">Additional Sources (as NDJSON!)</Label>
         <Input
           id="extra-sources"
           type="file"

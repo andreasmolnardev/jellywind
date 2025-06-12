@@ -24,6 +24,7 @@
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.513.0",
+    "ndjson": "^2.0.0",
     "next": "15.3.3",
     "react": "^19.0.0",
     "react-day-picker": "^9.7.0",
@@ -36,6 +37,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
+    "@types/ndjson": "^2.0.4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

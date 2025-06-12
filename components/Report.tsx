@@ -13,6 +13,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Terminal } from "lucide-react"
 import { useEffect, useState } from "react";
 import RootlessFrame from "./RootlessFrame";
+import { pl } from "date-fns/locale";
 
 type ReportType = {
   id: string;
@@ -25,7 +26,6 @@ type ReportType = {
 
 export default function ReportComponent() {
   const [loading, setLoading] = useState(true);
-  const [report, setReport] = useState([]);
   const [error, setError] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [reportData, setReportData] = useState<ReportType | null>(null);
@@ -76,14 +76,66 @@ export default function ReportComponent() {
   const fetchJellyfinMusicData = async (fromDate: string, toDate: string) => {
     try {
       // Get most played items (songs/tracks)
-      const mostPlayedItems = await fetchFromJellyfin(`/Users/${credentials.userId}/Items`, {
-        IncludeItemTypes: 'Audio',
-        Recursive: true,
-        SortBy: 'PlayCount',
-        SortOrder: 'Descending',
-        Limit: 10,
-        Fields: 'PlayCount,UserData,PrimaryImageAspectRatio,MediaSourceCount,BasicSyncInfo'
-      });
+      const mostPlayedItems = await (async () => {
+        const query = `
+    SELECT ItemId, ItemName, COUNT(*) as PlayCount, SUM(PlayDuration) as TotalDuration  
+    FROM PlaybackActivity  
+    WHERE ItemType = 'Audio'  
+    AND DateCreated BETWEEN '${fromDate}' AND '${toDate}'
+    AND UserId="${credentials.userId}"
+    GROUP BY ItemId, ItemName  
+    ORDER BY PlayCount DESC  
+    LIMIT 10
+  `;
+
+        const res = await fetch(`${credentials.serverUrl}/user_usage_stats/submit_custom_query`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `MediaBrowser Token=${credentials.token}`,
+          },
+          body: JSON.stringify({
+            CustomQueryString: query,
+            ReplaceUserId: false
+          }),
+        });
+
+        const result = await res.json();
+        const stats = result?.results || [];
+
+        const statsObj = stats.map(([id, name, playCount, totalDuration]) => ({
+          id,
+          name,
+          playCount,
+          totalDuration
+        }));
+
+        console.log('Most Played Stats:', statsObj);
+        if (stats.length === 0) return { Items: [] };
+
+        const itemIds = stats.map(item => item[0]);
+
+        // Fetch item metadata
+        const itemsRes = await fetchFromJellyfin(`/Items`, {
+          Ids: itemIds.join(','),
+          Fields: 'PlayCount,UserData,PrimaryImageAspectRatio,MediaSourceCount,BasicSyncInfo'
+        });
+
+        // Reattach play duration to metadata
+        const itemsWithDuration = itemsRes.Items
+          ?.filter(item => item.Type === 'Audio')
+          .map(item => {
+            const stat = statsObj.find(obj => obj.id === item.Id);
+            return {
+              ...item,
+              playCountFromDB: stat?.playCount || 0,
+              TotalPlaySeconds: stat?.TotalPlaySeconds ?? 0
+            };
+          }) || [];
+
+
+        return { Items: itemsWithDuration };
+      })();
 
       if (!mostPlayedItems) return null; // Error already set in fetchFromJellyfin
 
@@ -93,21 +145,24 @@ export default function ReportComponent() {
         Recursive: true,
         SortBy: 'DatePlayed',
         SortOrder: 'Descending',
-        Limit: 50,
-        Fields: 'PlayCount,UserData,DatePlayed,RunTimeTicks'
+        Fields: 'PlayCount,UserData,DatePlayed,RunTimeTicks',
+        MinDatePlayed: fromDate,
+        MaxDatePlayed: toDate
       });
 
       if (!recentlyPlayed) return null;
 
-      // Get artists statistics - we'll calculate from songs since artist PlayCount might not be reliable
+      // Get artists statistics
       const allPlayedSongs = await fetchFromJellyfin(`/Users/${credentials.userId}/Items`, {
         IncludeItemTypes: 'Audio',
         Recursive: true,
         SortBy: 'PlayCount',
         SortOrder: 'Descending',
-        Limit: 1000, // Get more songs to calculate artist stats
-        Fields: 'PlayCount,UserData,Artists,AlbumArtist'
+        Fields: 'PlayCount,UserData,Artists,AlbumArtist',
+        MinDatePlayed: fromDate,
+        MaxDatePlayed: toDate
       });
+
 
       if (!allPlayedSongs) return null;
 
@@ -130,45 +185,68 @@ export default function ReportComponent() {
         artist: item.Artists?.join(', ') || item.AlbumArtist || 'Unknown Artist',
         album: item.Album || 'Unknown Album',
         plays: item.UserData?.PlayCount || 0,
+        totalPlayTime: item.TotalPlaySeconds || 0,
+        playCountFromDB: item.playCountFromDB || 0,
         id: item.Id
       })) || [];
 
+
       // Process skipped songs
-      const potentialSkipped = recentlyPlayed.Items?.filter((item: any) =>
-        (item.UserData?.PlayCount || 0) < 3 && item.UserData?.LastPlayedDate
-      ).map((item: any, index: number) => ({
-        rank: index + 1,
-        title: item.Name,
-        artist: item.Artists?.join(', ') || item.AlbumArtist || 'Unknown Artist',
-        album: item.Album || 'Unknown Album',
-        skips: Math.max(1, 5 - (item.UserData?.PlayCount || 0)), // Estimated skip count
-        id: item.Id
-      })).slice(0, 10) || [];
+      const potentialSkipped = recentlyPlayed.Items
+        ?.filter(item => item.UserData?.PlayCount > 0 && item.UserData?.PlaybackDurationTicks > 0)
+        .map(item => {
+          const playCount = item.UserData.PlayCount;
+          const totalTicks = item.UserData.PlaybackDurationTicks;
+          const avgSeconds = (totalTicks / playCount) / 10_000_000;
+
+          return {
+            title: item.Name,
+            artist: item.Artists?.join(', ') || item.AlbumArtist || 'Unknown Artist',
+            album: item.Album || 'Unknown Album',
+            playCount,
+            avgPlayTime: avgSeconds,
+            totalPlayTime: totalTicks / 10_000_000,
+            lastPlayed: item.UserData.LastPlayedDate ? new Date(item.UserData.LastPlayedDate) : null,
+            id: item.Id
+          };
+        })
+        .filter(item => item.playCount >= 1 && item.avgPlayTime < 60) // only include low average playtime
+        .sort((a, b) => a.avgPlayTime - b.avgPlayTime || b.playCount - a.playCount)
+        .slice(0, 10); // top 10 most skipped-like
+
+      console.log('Potential Skipped Songs:', potentialSkipped);
 
       // Calculate top artists from song play counts
       const artistPlayCounts: { [key: string]: { name: string; plays: number; id?: string } } = {};
-      
-      const fetchAllArtists = async () => {
-        const response = await fetchFromJellyfin('/Artists', {
-          Limit: 99999 // A very high limit to get everything in one call
+
+      const fetchArtistByName = async (name: string) => {
+        const res = await fetchFromJellyfin('/Artists', {
+          SearchTerm: name,
+          Limit: 1
         });
 
-        return response?.Items || [];
+        return res?.Items?.[0]; // May return undefined if not found
       };
 
-      const allArtists = await fetchAllArtists();
+      const fetchTopArtistsWithThumbnails = async (topArtistStats: { name: string; plays: number }[]) => {
+        const topArtists = await Promise.all(
+          topArtistStats.map(async (artist) => {
+            const artistData = await fetchArtistByName(artist.name);
 
-      const artistMap: { [name: string]: { id: string, name: string, imageTag?: string } } = {};
+            return {
+              name: artist.name,
+              plays: artist.plays,
+              id: artistData?.Id,
+              thumbnail: artistData?.ImageTags?.Primary
+                ? `/Items/${artistData.Id}/Images/Primary?maxHeight=80`
+                : null
+            };
+          })
+        );
 
-      allArtists?.forEach((artist: any) => {
-        artistMap[artist.Name] = {
-          id: artist.Id,
-          name: artist.Name,
-          imageTag: artist.ImageTags?.Primary
-        };
-      });
+        return topArtists;
+      };
 
-      console.log('Artist Map:', artistMap);
 
 
       allPlayedSongs.Items?.forEach((song: any) => {
@@ -198,19 +276,20 @@ export default function ReportComponent() {
 
 
       // Convert to sorted array and get top 10
-      const topArtistsList = Object.values(artistPlayCounts)
+      const topArtistStats = Object.values(artistPlayCounts)
         .sort((a, b) => b.plays - a.plays)
-        .slice(0, 10)
-        .map((artist, index) => {
-          const realArtist = artistMap[artist.name];
-          return {
-            rank: index + 1,
-            name: artist.name,
-            plays: artist.plays,
-            id: realArtist?.id,
-            imageTag: realArtist?.imageTag
-          };
-        });
+        .slice(0, 10);
+
+      const topArtistsList = await fetchTopArtistsWithThumbnails(topArtistStats).then((artists) =>
+        artists.map((artist, index) => ({
+          rank: index + 1,
+          name: artist.name,
+          plays: artist.plays,
+          id: artist.id,
+          thumbnail: artist.thumbnail
+        }))
+      );
+
 
       const topAlbumsList = topAlbums.Items?.map((item: any, index: number) => ({
         rank: index + 1,
@@ -389,7 +468,7 @@ export default function ReportComponent() {
                         <p className="font-medium truncate">{song.title}</p>
                         <p className="text-sm text-muted-foreground truncate">{song.artist}</p>
                       </div>
-                      <span className="text-sm font-medium flex-shrink-0">{song.plays} plays</span>
+                      <span className="text-sm font-medium flex-shrink-0">{song.playCountFromDB} plays</span>
                     </div>
                   ))}
                 </div>
@@ -418,7 +497,7 @@ export default function ReportComponent() {
                     <div key={artist.id} className="flex items-center gap-3">
                       <div className="w-12 h-12 rounded-full overflow-hidden bg-gray-200 flex-shrink-0">
                         <img
-                          src={`${credentials.serverUrl}/Items/${artist.id}/Images/Primary?tag=${artist.imageTag}&fillHeight=120&fillWidth=120`}
+                          src={`${credentials.serverUrl}${artist.thumbnail || `/Items/${artist.id}/Images/Primary?maxHeight=80`}`}
                           alt={artist.name}
                           className="w-12 h-12 object-cover rounded-full"
                         />
